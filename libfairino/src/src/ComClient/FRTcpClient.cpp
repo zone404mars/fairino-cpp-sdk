@@ -104,6 +104,17 @@ int FRTcpClient::ReConnect()
     maxConnTimes = reConnTime / timeOut;
 #endif // WIN32
 
+    // Division entiere : avec les defauts reConnTime=30000 et timeOut=50000,
+    // maxConnTimes vaut 0 et la boucle ne tente JAMAIS de reconnexion (echec
+    // permanent silencieux du canal, flood d'erreurs RecvFrame). Au moins 1 essai.
+    // Symptomes sans ce plancher : flood infini de "(241 RecvFrame) robot get
+    // cmd rpy frame failed" et StopMotion/PauseMotion/ResumeMotion perdus
+    // definitivement (envoi fire-and-forget, echec invisible pour l'appelant).
+    if (maxConnTimes < 1)
+    {
+        maxConnTimes = 1;
+    }
+
     for (int i = 0; i < maxConnTimes; i++)
     {
         int connRtn = Connect();
@@ -163,10 +174,14 @@ int FRTcpClient::SetTimeOut(int timeout)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
 
-    int keepAlive = 1; // 开启keepalive属性
-    int keepIdle = 1; // 如该连接在60秒内没有任何数据往来,则进行探测 
-    int keepInterval = 1; // 探测时发包的时间间隔为5 秒
-    int keepCount = 1; // 探测尝试的次数.如果第1次探测包就收到响应了,则不再发.
+    // Valeurs d'origine 1/1/1 : une seule sonde keepalive sans reponse dans la
+    // seconde tuait la connexion (canal cmd 8080 inactif en permanence, donc
+    // sonde constamment, tres expose aux microlatences du controleur/sim).
+    // 10/3/3 : detection d'une mort reelle en ~19 s, sans faux positifs.
+    int keepAlive = 1;
+    int keepIdle = 10;
+    int keepInterval = 3;
+    int keepCount = 3;
 
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (void*)&keepAlive, sizeof(keepAlive));
     setsockopt(fd, SOL_TCP, TCP_KEEPIDLE, (void*)&keepIdle, sizeof(keepIdle));
