@@ -318,6 +318,17 @@ errno_t FRRobot::CloseRPC()
     {
         udpCmdClient->Close();
     }
+
+    // Patch z404 : arreter aussi le thread d'etat CNDE, comme le canal 8080 juste
+    // au-dessus. Depuis que RecvRobotStateThread reboucle sur une reconnexion
+    // echouee, il ne meurt plus seul.
+    // Symptome sans ce patch : apres CloseRPC, le thread continue de tenter la
+    // reconnexion et, si le controleur revient, remet g_sock_com_err a ERR_SUCCESS
+    // sur une connexion fermee.
+    if (cndeClient != nullptr)
+    {
+        cndeClient->Close();
+    }
     
     g_sock_com_err = ERR_SOCKET_COM_FAILED;
     memset(robot_state_pkg.get(), 0, sizeof(ROBOT_STATE_PKG));
