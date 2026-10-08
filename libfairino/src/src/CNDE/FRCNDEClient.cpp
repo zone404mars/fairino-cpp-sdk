@@ -87,6 +87,16 @@ int FRCNDEClient::Close()
     // du thread, RecvCNDEPkg y voit une coupure, ferme le fd une seconde fois
     // (le numero peut deja appartenir a une autre socket) et ouvre une nouvelle
     // connexion vers le controleur pendant l'arret.
+    // Limites connues, non corrigees (DEC-0080) :
+    // - R27 : Close ne reveille pas le thread. Bloque dans recv (keepalive ~19 s,
+    //   SO_RCVTIMEO 50 s) ou dans le sommeil de 50 s de FRTcpClient::Connect, il
+    //   ne voit le drapeau qu'au retour de cet appel : la sortie peut depasser
+    //   50 s. Un pair vivant mais muet le retient sans limite, car RecvCNDEPkg
+    //   reboucle sur EAGAIN sans lire le drapeau.
+    // - R26 : un RPC() appele avant cette sortie remet le drapeau a vrai et lance
+    //   un second RecvRobotStateThread. L'ancien reprend sa boucle et les deux
+    //   lisent la meme socket. Non mesure. z404_cobot_node n'appelle CloseRPC
+    //   qu'a on_shutdown et ne rappelle jamais RPC sur le meme FRRobot.
     robotStateRunFlag = false;
 	return 0;
 }
