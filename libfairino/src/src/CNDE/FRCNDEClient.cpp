@@ -80,9 +80,24 @@ bool FRCNDEClient::GetReConnState()
 
 int FRCNDEClient::Close()
 {
+    // Patch z404 : ne plus fermer la socket ici, seulement baisser le drapeau.
+    // RecvRobotStateThread la ferme lui-meme en sortant de sa boucle (flux a
+    // 8 ms, ou fin du sommeil de reconnexion pendant une coupure).
+    // Symptome sans ce patch : appele par CloseRPC, ce shutdown reveille le recv
+    // du thread, RecvCNDEPkg y voit une coupure, ferme le fd une seconde fois
+    // (le numero peut deja appartenir a une autre socket) et ouvre une nouvelle
+    // connexion vers le controleur pendant l'arret.
+    // Limites connues, non corrigees (DEC-0080) :
+    // - R27 : Close ne reveille pas le thread. Bloque dans recv (keepalive ~19 s,
+    //   SO_RCVTIMEO 50 s) ou dans le sommeil de 50 s de FRTcpClient::Connect, il
+    //   ne voit le drapeau qu'au retour de cet appel : la sortie peut depasser
+    //   50 s. Un pair vivant mais muet le retient sans limite, car RecvCNDEPkg
+    //   reboucle sur EAGAIN sans lire le drapeau.
+    // - R26 : un RPC() appele avant cette sortie remet le drapeau a vrai et lance
+    //   un second RecvRobotStateThread. L'ancien reprend sa boucle et les deux
+    //   lisent la meme socket. Non mesure. z404_cobot_node n'appelle CloseRPC
+    //   qu'a on_shutdown et ne rappelle jamais RPC sur le meme FRRobot.
     robotStateRunFlag = false;
-    
-    rtClient->Close();
 	return 0;
 }
 
@@ -105,12 +120,59 @@ void FRCNDEClient::RecvRobotStateThread()
         if (recvLen < 0)
         {   
             *sockComErr = ERR_SOCKET_COM_FAILED;
+            // Patch z404 : -2 signale une reconnexion echouee (reconnEnable vrai).
+            // On reboucle comme le thread de reception du canal 8080
+            // (RobotInstCmdRecvRoutineThread) : l'appel suivant de RecvCNDEPkg
+            // echoue sur la socket non connectee et relance ReConnect, rythme par
+            // le sommeil de timeOut dans Connect. Seul l'arret (Close, appele par
+            // CloseRPC) sort de la boucle.
+            // Symptome sans ce patch : apres un redemarrage du controleur, ce
+            // thread meurt apres sa seule tentative, g_sock_com_err reste a
+            // ERR_SOCKET_COM_FAILED pour toujours, plus aucun etat temps reel ni
+            // appel du SDK, meme apres deactivate/activate ou cleanup/configure.
+            if (recvLen == -2)
+            {
+                if (robotStateRunFlag)
+                {
+                    continue;
+                }
+                break;  // arret demande : sortie par le rtClient->Close() final
+            }
             return;
         }
         else if (recvLen == 0)  //发生重连，需要再次发送开始指令帧
         {
-            SendCNDEOutputConfig();
-            SetCNDEStart();
+            // Patch z404 : RecvCNDEPkg rend 0 apres une reconnexion reussie. On
+            // renvoie la configuration et la trame de demarrage (protocole CNDE,
+            // comme Connect), puis on efface l'erreur collee que ce thread a
+            // posee : c'est le seul endroit qui sait que le flux d'etat repart.
+            // Le canal 8080 ne pose jamais g_sock_com_err en reception, et tant
+            // qu'il se reconnecte IsSockError() reste vrai par GetReConnState().
+            // Garde robotStateRunFlag : apres CloseRPC, ne pas effacer l'erreur
+            // qu'il vient de poser.
+            // Symptome sans ce patch : le flux repart mais g_sock_com_err reste
+            // pose, tous les appels du SDK echouent (hors ici, seuls le
+            // constructeur et RPC() le remettent a ERR_SUCCESS, et le HAL ne
+            // rappelle jamais RPC()).
+            if (!robotStateRunFlag)
+            {
+                break;
+            }
+            // Config ou start refuse (controleur pas encore pret) : reessayer sur
+            // la meme socket. Sans cela RecvCNDEPkg attend un flux qui ne vient
+            // jamais et boucle sur EAGAIN sans rendre la main. Un echec de socket
+            // pendant ces appels passe par leur propre reconnexion.
+            // ponytail: 1 s fixe entre deux essais, aucun plafond ; un refus
+            // permanent (etat inconnu du controleur) boucle jusqu'a l'arret.
+            while (robotStateRunFlag && (SendCNDEOutputConfig() != 0 || SetCNDEStart() != 0))
+            {
+                logger_error("CNDE config/start after reconnect failed, retry in 1 s");
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (robotStateRunFlag)
+            {
+                *sockComErr = ERR_SUCCESS;
+            }
         }
         else
         {

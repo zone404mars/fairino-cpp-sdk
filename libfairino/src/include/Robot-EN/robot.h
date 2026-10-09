@@ -5220,6 +5220,8 @@ private:
 	std::vector<std::string> split(std::string s, std::string delimiter);
 
 	bool IsSockError();
+	// Patch z404 : code d'erreur a rendre quand IsSockError() est vrai, jamais ERR_SUCCESS.
+	int GetSockErrCode();
 	int GetSafetyCode();
 
 private:
